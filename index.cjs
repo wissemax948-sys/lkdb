@@ -19,7 +19,7 @@ const server = http.createServer(app);
 
 const io = socketIo(server, {
   cors: {
-    origin: "http://localhost:5173",
+    origin: "https://admin-ew8.pages.dev/",
     methods: ["GET", "POST"]
   }
 });
@@ -28,7 +28,7 @@ const io = socketIo(server, {
 app.use(helmet());
 app.use(morgan('combined'));
 app.use(cors({
-  origin: 'http://localhost:5173',
+  origin: 'https://admin-ew8.pages.dev/',
   credentials: true,
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
