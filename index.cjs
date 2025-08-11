@@ -19,7 +19,7 @@ const server = http.createServer(app);
 
 const io = socketIo(server, {
   cors: {
-    origin: "https://admin-ew8.pages.dev",
+    origin: "http://localhost:5173",
     methods: ["GET", "POST"]
   }
 });
@@ -28,7 +28,7 @@ const io = socketIo(server, {
 app.use(helmet());
 app.use(morgan('combined'));
 app.use(cors({
-  origin: 'https://admin-ew8.pages.dev',
+  origin: 'http://localhost:5173',
   credentials: true,
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -768,9 +768,14 @@ app.post('/api/discordlookup', authenticateToken, async (req, res) => {
 
 
 
-// --- WebSocket chat ---
+let onlineUsersCount = 0;
+
 io.on('connection', (socket) => {
-  console.log('Un utilisateur connecté', socket.id);
+  onlineUsersCount++;
+  console.log('Un utilisateur connecté', socket.id, '-> total:', onlineUsersCount);
+
+  // Diffuser le nouveau nombre d’utilisateurs à tous
+  io.emit('online_users_count', onlineUsersCount);
 
   socket.on('send_message', async (data) => {
     console.log('Reçu send_message:', data);
@@ -786,7 +791,6 @@ io.on('connection', (socket) => {
 
       const userId = decoded.userId;
 
-
       const { data: insertedData, error } = await supabase
         .from('chat_messages')
         .insert([{ user_id: userId, message: data.message, created_at: new Date().toISOString() }])
@@ -795,19 +799,19 @@ io.on('connection', (socket) => {
 
       if (error) {
         console.error('Erreur insertion message:', error);
-        // Optionnel : émettre un message d'erreur au client
         socket.emit('message_error', { error: error.message });
         return;
       }
 
       console.log('Message inséré:', insertedData);
 
+      // Émettre à tous sauf à l’émetteur
       socket.broadcast.emit('new_message', {
-  id: insertedData.id,
-  userId: insertedData.user_id,
-  text: insertedData.message,
-  timestamp: insertedData.created_at,
-});
+        id: insertedData.id,
+        userId: insertedData.user_id,
+        text: insertedData.message,
+        timestamp: insertedData.created_at,
+      });
     } catch (err) {
       console.error('Erreur token ou insertion:', err);
       socket.emit('message_error', { error: err.message });
@@ -815,9 +819,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    console.log('Utilisateur déconnecté', socket.id);
+    onlineUsersCount--;
+    console.log('Utilisateur déconnecté', socket.id, '-> total:', onlineUsersCount);
+    io.emit('online_users_count', onlineUsersCount);
   });
 });
+
 
 
 // --- Lancement du serveur ---
