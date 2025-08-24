@@ -19,7 +19,7 @@ const server = http.createServer(app);
 
 const io = socketIo(server, {
   cors: {
-    origin: "https:breachhub.fr",
+    origin: "https://breachhub.fr",
     methods: ["GET", "POST"]
   }
 });
