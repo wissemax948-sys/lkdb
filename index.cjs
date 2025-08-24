@@ -19,7 +19,7 @@ const server = http.createServer(app);
 
 const io = socketIo(server, {
   cors: {
-    origin: "https://admin-ew8.pages.dev",
+    origin: "https:breachhub.fr",
     methods: ["GET", "POST"]
   }
 });
@@ -28,7 +28,7 @@ const io = socketIo(server, {
 app.use(helmet());
 app.use(morgan('combined'));
 app.use(cors({
-  origin: 'https://admin-ew8.pages.dev',
+  origin: 'https://breachhub.fr',
   credentials: true,
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -275,6 +275,7 @@ app.get('/api/chat/messages', authenticateToken, async (req, res) => {
       .select(`
         id,
         message,
+        image,
         created_at,
         user_id,
         users (
@@ -294,6 +295,7 @@ app.get('/api/chat/messages', authenticateToken, async (req, res) => {
     const formattedMessages = messages.map(msg => ({
       id: msg.id,
       text: msg.message,
+      image: msg.image || null, // <-- ajoute l'image ici
       userId: msg.user_id,
       userName: msg.users?.name || 'Anonyme',
       timestamp: new Date(msg.created_at),
@@ -517,16 +519,16 @@ app.post('/api/use-credit', async (req, res) => {
 
 const https = require('https');
 
-// --- Route recherche avec plan utilisateur ---
 app.post('/api/search', authenticateToken, async (req, res) => {
   console.log('--- Nouvelle recherche reçue ---');
   console.log('Utilisateur:', req.user);
   console.log('Corps de la requête:', req.body);
 
-  const { query, limit = 100, lang = 'fr' } = req.body;
+  const query = req.body.query;
+  const limit = req.body.limit || 100;
+  const lang = req.body.lang || 'fr';
 
   if (!query || typeof query !== 'string') {
-    console.log('Recherche échouée : paramètre query manquant ou invalide');
     return res.status(400).json({ error: 'Paramètre query requis' });
   }
 
@@ -538,22 +540,17 @@ app.post('/api/search', authenticateToken, async (req, res) => {
       .eq('id', req.user.id)
       .single();
 
-    if (userError) {
-      console.error('Erreur lecture user credits:', userError);
+    if (userError || !userData) {
       return res.status(500).json({ error: 'Erreur interne.' });
     }
 
-    if (!userData || userData.credits <= 0) {
+    if (userData.credits <= 0) {
       return res.status(403).json({ success: false, error: 'Crédits insuffisants.' });
     }
 
-    const userPlan = req.user.plan || (userData.plan || 'free');
-    console.log('Plan utilisateur:', userPlan);
-
+    const userPlan = req.user.plan || userData.plan || 'free';
     const allowedPlans = ['standard', 'advanced', 'pro', 'premium'];
-
     if (!allowedPlans.includes(userPlan)) {
-      console.log('Plan non autorisé pour la recherche:', userPlan);
       return res.json({
         success: false,
         data: null,
@@ -563,99 +560,68 @@ app.post('/api/search', authenticateToken, async (req, res) => {
       });
     }
 
-    console.log("Appel à l'API externe LeakOSINT avec la requête:", query);
-
     const API_URL = 'https://leakosintapi.com/';
-    const TOKEN = '8210577188:Rkm4TrsU';
+    const TOKEN = '7298666386:4KWstckB';
+    const payload = { token: TOKEN, request: query, limit, lang };
 
     const response = await fetch(API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        token: TOKEN,
-        request: query,
-        limit,
-        lang,
-      }),
+      body: JSON.stringify(payload),
     });
 
-    console.log('Réponse API externe status:', response.status);
-
     const apiData = await response.json();
+    console.log('Réponse brute de LeakOSINT:', JSON.stringify(apiData, null, 2));
 
-    if (!response.ok) {
-      console.log('Erreur lors de la recherche externe:', apiData);
-      return res.status(response.status).json({
-        success: false,
-        error: 'Erreur lors de la recherche externe',
+    // Transformation des résultats à partir de apiData.List
+    var results = [];
+    if (apiData.List && typeof apiData.List === 'object') {
+      results = Object.entries(apiData.List).map(function([sourceName, value]) {
+        return {
+          name: sourceName,
+          infoLeak: value.InfoLeak || "",
+          numOfResults: value.NumOfResults || 0,
+          data: value.Data || [],
+        };
       });
     }
 
-    // Transformation de la structure : apiData.data est un objet avec plusieurs sources
-    const results = Object.entries(apiData.data || {}).map(([name, value]) => ({
-      name,
-      infoLeak: value.InfoLeak,
-      numOfResults: value.NumOfResults,
-      data: value.Data || [],
-    }));
+    console.log('Résultats transformés pour le front:', results);
 
-    console.log('Nombre de sources reçues:', results.length);
+    // Décrémente crédits et incrémente search_count
+    const newSearchCount = (userData.search_count || 0) + 1;
+    await supabase.from('users').update({
+      credits: userData.credits - 1,
+      search_count: newSearchCount
+    }).eq('id', req.user.id);
 
-    // Décrémente les crédits utilisateur et incrémente search_count
-    const newSearchCount = (typeof userData.search_count === 'number' ? userData.search_count : 0) + 1;
+    // Ajout à l'historique
+    await supabase.from('search_history').insert([{
+      user_id: req.user.id,
+      query,
+      results_count: results.reduce(function(sum, r) { return sum + (r.numOfResults || 0); }, 0),
+    }]);
 
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({ 
-        credits: userData.credits - 1,
-        search_count: newSearchCount
-      })
-      .eq('id', req.user.id);
+    // Limiter l'historique à 10 dernières recherches
+    const { data: allHistory } = await supabase
+      .from('search_history')
+      .select('id')
+      .eq('user_id', req.user.id)
+      .order('created_at', { ascending: false });
 
-    if (updateError) {
-      console.error('Erreur mise à jour crédits ou search_count:', updateError);
-      // On continue quand même
-    } else {
-      console.log(`Crédits et search_count mis à jour : credits=${userData.credits - 1}, search_count=${newSearchCount}`);
+    if (allHistory && allHistory.length > 10) {
+      const toDelete = allHistory.slice(10).map(function(item) { return item.id; });
+      await supabase.from('search_history').delete().in('id', toDelete);
     }
 
-    // Ajout dans l'historique
-    try {
-      await supabase.from('search_history').insert([
-        {
-          user_id: req.user.id,
-          query,
-          results_count: results.reduce((sum, r) => sum + (r.numOfResults || 0), 0),
-        },
-      ]);
-      console.log('Historique mis à jour');
+    res.json({ success: true, data: results, plan: userPlan });
 
-      // Garde les 10 dernières recherches
-      const { data: allHistory } = await supabase
-        .from('search_history')
-        .select('id')
-        .eq('user_id', req.user.id)
-        .order('created_at', { ascending: false });
-
-      if (allHistory && allHistory.length > 10) {
-        const toDelete = allHistory.slice(10).map((item) => item.id);
-        await supabase.from('search_history').delete().in('id', toDelete);
-        console.log('Anciennes recherches supprimées:', toDelete.length);
-      }
-    } catch (historyError) {
-      console.error('Erreur ajout historique:', historyError);
-    }
-
-    res.json({
-      success: true,
-      data: results,
-      plan: userPlan,
-    });
   } catch (err) {
     console.error('Erreur serveur recherche:', err);
     res.status(500).json({ error: 'Erreur serveur' });
   }
 });
+
 
 
 // --- Route lookup Discord ---
@@ -778,45 +744,47 @@ io.on('connection', (socket) => {
   io.emit('online_users_count', onlineUsersCount);
 
   socket.on('send_message', async (data) => {
-    console.log('Reçu send_message:', data);
+  try {
+    const decoded = jwt.verify(data.token, process.env.JWT_SECRET);
+    const userId = decoded.userId;
 
-    if (!data?.token || !data?.message) {
-      console.log('Missing token or message');
-      return;
+    // Insérer le nouveau message
+    const { data: insertedData, error: insertError } = await supabase
+      .from('chat_messages')
+      .insert([{ user_id: userId, message: data.message, created_at: new Date().toISOString() }])
+      .select()
+      .single();
+
+    if (insertError) throw insertError;
+
+    // Compter le nombre total de messages
+    const { data: allMessages, error: countError } = await supabase
+      .from('chat_messages')
+      .select('id')
+      .order('created_at', { ascending: true });
+
+    if (countError) throw countError;
+
+    // Supprimer les plus anciens si > 100
+    if (allMessages.length > 100) {
+      const messagesToDelete = allMessages.slice(0, allMessages.length - 100).map(m => m.id);
+      await supabase.from('chat_messages').delete().in('id', messagesToDelete);
     }
 
-    try {
-      const decoded = jwt.verify(data.token, process.env.JWT_SECRET);
-      console.log('Token décodé:', decoded);
+    // Émettre le nouveau message à tous
+    socket.broadcast.emit('new_message', {
+      id: insertedData.id,
+      userId: insertedData.user_id,
+      text: insertedData.message,
+      timestamp: insertedData.created_at,
+      tempId: data.tempId,
+    });
+  } catch (err) {
+    console.error('Erreur envoi message:', err);
+    socket.emit('message_error', { error: err.message });
+  }
+});
 
-      const userId = decoded.userId;
-
-      const { data: insertedData, error } = await supabase
-        .from('chat_messages')
-        .insert([{ user_id: userId, message: data.message, created_at: new Date().toISOString() }])
-        .select()
-        .single();
-
-      if (error) {
-        console.error('Erreur insertion message:', error);
-        socket.emit('message_error', { error: error.message });
-        return;
-      }
-
-      console.log('Message inséré:', insertedData);
-
-      // Émettre à tous sauf à l’émetteur
-      socket.broadcast.emit('new_message', {
-        id: insertedData.id,
-        userId: insertedData.user_id,
-        text: insertedData.message,
-        timestamp: insertedData.created_at,
-      });
-    } catch (err) {
-      console.error('Erreur token ou insertion:', err);
-      socket.emit('message_error', { error: err.message });
-    }
-  });
 
   socket.on('disconnect', () => {
     onlineUsersCount--;
